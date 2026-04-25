@@ -1,0 +1,10 @@
+[package]
+name = "cometahn142/snap"
+description = "Snap For Roblox"
+version = "0.2.0"
+license = "MIT"
+registry = "https://github.com/UpliftGames/wally-index"
+realm = "shared"
+include = ["src", "default.project.json", "LICENSE", "README.md"]
+
+[dependencies]
