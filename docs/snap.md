@@ -1,78 +1,49 @@
-# Snap
+# Snap API Reference
 
-This page summarizes the main public API exposed by the module.
+The public API of Snap focuses on robust type definition, optimized serialization, and low-overhead throughput.
 
-## Core API
+## Core Methods
 
-- `Snap.defineNamespace(name, builder)`
-- `Snap.serialize(schema, value)`
-- `Snap.deserialize(schema, buffer, refs?)`
+### `Snap.channel(name: string, definition: table)`
+Registers a distinct communication domain between the server and the client.
+* `name`: The global identifier of the channel.
+* `definition`: A dictionary containing packet entries created by `Snap.event` and `Snap.request`.
 
-These are the three entry points most users interact with directly.
+### `Snap.event(schema: DataType, reliability: string?)`
+Defines a unidirectional network event payload.
+* `schema`: The expected `DataType` schema validation rules.
+* `reliability`: Networking standard; either `"Reliable"` or `"Unreliable"`. Defaults to `"Reliable"`.
+
+### `Snap.request(requestSchema: DataType, responseSchema: DataType)`
+Defines a bidirectional, yielding RPC interface.
+* `requestSchema`: The payload schema that the client/server sends.
+* `responseSchema`: The payload schema that the responding peer returns.
 
 ## Built-in Data Types
 
-### Numeric
+Snap provides optimized internal primitives and combinators for network encoding:
 
-- `uint8`, `uint16`, `uint32`
-- `int8`, `int16`, `int32`
-- `uvarint`, `varint`
-- `float32`, `float64`
+### Primitive / Numeric Types
+* Integers: `uint8`, `uint16`, `uint32`, `int8`, `int16`, `int32`.
+* Variable-length Integers: `uvarint`, `varint`.
+* Decimals: `float32`, `float64`.
+* Common: `bool`, `char`, `string`, `null`, `auto`, `unknown`, `inst` (Roblox Instance).
 
-### Primitive
-
-- `bool`
-- `char`
-- `string`
-- `null`
-- `auto`
-- `unknown`
-- `inst`
-
-### Roblox-specific
-
-- `vector3`
-- `vector3int16`
-- `color3`
-- `color3b`
-- `cframe`
+### Roblox Engine Types
+* `vector3`, `vector3int16`, `color3`, `color3b`, `cframe`.
 
 ### Combinators
+* `struct(fields: table)` - A strictly keyed map.
+* `array(elementType: DataType)` - An ordered list.
+* `map(keyType, valueType)` - A typed dictionary.
+* `optional(innerType)` - A nullable pointer.
+* `flags(names: table)` - A bitpacked set of boolean toggles.
 
-- `struct(fields)`
-- `array(elementType)`
-- `map(keyType, valueType)`
-- `optional(innerType)`
-- `flags(names)`
+## Memory Management: Table Pooling
 
-## Namespace Builder
+To mitigate garbage collection overhead during continuous transmission loops, Snap supports optional Table Pooling.
 
-Inside `defineNamespace`, the builder receives:
+Both `struct` and `array` expose an extended `read` signature:
+`read(buffer: buffer, offset: number, target: table?) -> (table, number)`
 
-- `p.packet(schema, reliability?)`
-- `p.invoke(requestSchema, responseSchema)`
-
-## Runtime Handles
-
-### Packet
-
-- `send(value)` on the client
-- `sendTo(player, value)` on the server
-- `sendToAll(value)`
-- `sendToAllExcept(player, value)`
-- `sendToList(players, value)`
-- `listen(callback)` -> `unlisten()`
-
-### Invoke
-
-- `invoke(...) -> (ok, resultOrError)`
-- `handle(callback)` -> `unbind()`
-
-## Related Docs
-
-- [Installation](./installation.md)
-- [Usage Patterns](./usage-patterns.md)
-
-## License
-
-MIT. See `LICENSE`.
+Supplying an existing array or map to the `target` parameter overrides default allocations, pushing deserialized state into the reused memory directly.

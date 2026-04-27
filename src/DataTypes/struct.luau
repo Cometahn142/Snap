@@ -48,8 +48,8 @@ local function struct(fields: { [string]: AnyDataType }): DataType<{ [string]: a
 
 	local fieldCount = n
 
-	local function read(b: buffer, offset: number): ({ [string]: any }, number)
-		local result: { [string]: any } = {}
+	local function read(b: buffer, offset: number, target: { [string]: any }?): ({ [string]: any }, number)
+		local result: { [string]: any } = target or {}
 		local cursor = offset
 		for i = 1, fieldCount do
 			local value: any

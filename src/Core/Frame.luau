@@ -8,7 +8,7 @@ local BufferWriter = require(script.Parent.BufferWriter)
 local Refs = require(script.Parent.Refs)
 local Varint = require(script.Parent.Varint)
 
-type PacketDefinition<T> = Types.PacketDefinition<T>
+type EventDefinition<T> = Types.EventDefinition<T>
 
 local OMIT_FIXED_LENGTH = Settings.OMIT_FIXED_LENGTH
 local OMIT_OUTER_LENGTH_PREFIX = Settings.OMIT_OUTER_LENGTH_PREFIX
@@ -26,9 +26,9 @@ type WriterLike = {
 	reserve: (self: WriterLike, additional: number) -> (),
 }
 
-type NamespaceLike = {
+type ChannelLike = {
 	name: string,
-	packets: { PacketDefinition<any> },
+	packets: { EventDefinition<any> },
 }
 
 local Frame = {}
@@ -41,11 +41,7 @@ Frame.writeVarint = writeVarint
 Frame.readVarint = readVarint
 Frame.varintSize = varintSize
 
-local function appendPacketImpl<T>(
-	writer: WriterLike,
-	definition: PacketDefinition<T>,
-	value: T
-)
+local function appendPacketImpl<T>(writer: WriterLike, definition: EventDefinition<T>, value: T)
 	local schema = definition.schema
 
 	if OMIT_FIXED_LENGTH and definition.isFixed then
@@ -118,11 +114,7 @@ end
 Frame.appendPacketImpl = appendPacketImpl
 
 if USE_XPCALL then
-	function Frame.appendPacket<T>(
-		writer: WriterLike,
-		definition: PacketDefinition<T>,
-		value: T
-	)
+	function Frame.appendPacket<T>(writer: WriterLike, definition: EventDefinition<T>, value: T)
 		local savedCursor = writer.cursor
 		local savedRefsLen = #writer.refs
 
@@ -144,11 +136,7 @@ if USE_XPCALL then
 		end
 	end
 else
-	function Frame.appendPacket<T>(
-		writer: WriterLike,
-		definition: PacketDefinition<T>,
-		value: T
-	)
+	function Frame.appendPacket<T>(writer: WriterLike, definition: EventDefinition<T>, value: T)
 		Refs.beginWrite(writer.refs, writer.refsLookup)
 		appendPacketImpl(writer, definition, value)
 		Refs.endWrite()
@@ -157,10 +145,7 @@ end
 
 local sharedWriter = BufferWriter.new(4096) :: any
 
-function Frame.encodeShared<T>(
-	definition: PacketDefinition<T>,
-	value: T
-): (buffer?, number)
+function Frame.encodeShared<T>(definition: EventDefinition<T>, value: T): (buffer?, number)
 	sharedWriter.cursor = 0
 	if #sharedWriter.refs > 0 then
 		table.clear(sharedWriter.refs)
@@ -182,11 +167,7 @@ function Frame.encodeShared<T>(
 	return sharedWriter.buffer, sharedWriter.cursor
 end
 
-function Frame.appendRaw(
-	writer: WriterLike,
-	source: buffer,
-	length: number
-)
+function Frame.appendRaw(writer: WriterLike, source: buffer, length: number)
 	if writer.cursor + length > writer.capacity then
 		writer:reserve(length)
 	end
@@ -196,22 +177,17 @@ end
 
 if not OMIT_FIXED_LENGTH then
 	function Frame.decode(
-		namespace: NamespaceLike,
+		channel: ChannelLike,
 		frameBuffer: buffer,
-		onPacket: (definition: PacketDefinition<any>, payloadBuffer: buffer, payloadOffset: number) -> ()
+		onPacket: (definition: EventDefinition<any>, payloadBuffer: buffer, payloadOffset: number) -> ()
 	)
 		local length = buffer.len(frameBuffer)
 		local cursor = 0
-		local packets = namespace.packets
+		local packets = channel.packets
 
 		while cursor < length do
 			if VALIDATE_FRAMES and cursor + 3 > length then
-				warn(
-					string.format(
-						"[Snap] Truncated header in namespace '%s'",
-						namespace.name
-					)
-				)
+				warn(string.format("[Snap] Truncated header in channel '%s'", channel.name))
 				return
 			end
 
@@ -222,9 +198,9 @@ if not OMIT_FIXED_LENGTH then
 			if VALIDATE_FRAMES and cursor + size > length then
 				warn(
 					string.format(
-						"[Snap] Malformed payload for packet id=%d in namespace '%s' (claims %d bytes)",
+						"[Snap] Malformed payload for packet id=%d in channel '%s' (claims %d bytes)",
 						packetId,
-						namespace.name,
+						channel.name,
 						size
 					)
 				)
@@ -236,11 +212,7 @@ if not OMIT_FIXED_LENGTH then
 				onPacket(def, frameBuffer, cursor)
 			else
 				warn(
-					string.format(
-						"[Snap] Unknown packet id %d in namespace '%s' (skipping)",
-						packetId,
-						namespace.name
-					)
+					string.format("[Snap] Unknown packet id %d in channel '%s' (skipping)", packetId, channel.name)
 				)
 			end
 
@@ -250,3 +222,8 @@ if not OMIT_FIXED_LENGTH then
 end
 
 return Frame
+
+
+
+
+

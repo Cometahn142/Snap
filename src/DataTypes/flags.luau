@@ -18,10 +18,7 @@ local function flags(names: { string }): DataType<{ [string]: boolean }>
 		error("[Snap] flags() requires at least one name", 2)
 	end
 	if n > MAX_FLAGS then
-		error(
-			string.format("[Snap] flags() supports up to %d names, got %d", MAX_FLAGS, n),
-			2
-		)
+		error(string.format("[Snap] flags() supports up to %d names, got %d", MAX_FLAGS, n), 2)
 	end
 
 	local byteCount = math.ceil(n / 8)

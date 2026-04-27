@@ -26,10 +26,7 @@ local cframe: DataType<CFrame> = {
 	end,
 
 	write = function(b: buffer, offset: number, value: CFrame): number
-		local x, y, z,
-			r00, r01, r02,
-			r10, r11, r12,
-			r20, r21, r22 = value:GetComponents()
+		local x, y, z, r00, r01, r02, r10, r11, r12, r20, r21, r22 = value:GetComponents()
 		buffer.writef32(b, offset, x)
 		buffer.writef32(b, offset + 4, y)
 		buffer.writef32(b, offset + 8, z)

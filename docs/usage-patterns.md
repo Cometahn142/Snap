@@ -1,93 +1,86 @@
 # Usage Patterns
 
-This page focuses on how Snap is normally used in real projects.
+This guide illustrates proper communication conventions and advanced zero-allocation pooling workflows.
 
-## Defining a shared namespace
+## Defining the Network Contract
 
-The most important rule with Snap is that both peers must define the same
-namespace using the same name and the same keys.
+Place definitions in a shared path accessible to both peers.
 
 ```luau
-local Snap = require(Packages.Snap)
+-- ReplicatedStorage/Network.luau
+local Snap = require(game:GetService("ReplicatedStorage").Packages.Snap)
 
-local Chat = Snap.defineNamespace("Chat", function(p)
-	return {
-		Message = p.packet(Snap.string),
-		Ping = p.invoke(Snap.null, Snap.uint32),
-	}
+local CombatChannel = Snap.channel("Combat", {
+	Strike = Snap.event(Snap.struct({
+		targetId = Snap.uint32,
+		damage = Snap.uint16,
+	}), "Unreliable"),
+
+	RequestHeal = Snap.request(
+		Snap.uint32, -- Required mana
+		Snap.bool    -- Success status
+	),
+})
+
+return CombatChannel
+```
+
+## Event Transmission
+
+Events facilitate high-throughput synchronization loops.
+
+### Client to Server
+```luau
+local CombatChannel = require(ReplicatedStorage.Network)
+
+CombatChannel.Strike:send({
+	targetId = 9921,
+	damage = 25,
+})
+```
+
+### Server to Client
+```luau
+local CombatChannel = require(ReplicatedStorage.Network)
+
+CombatChannel.Strike:listen(function(player: Player, data)
+	print(`{player.Name} executed a strike. Damage: {data.damage}`)
 end)
 ```
 
-Think of this as the network contract for that feature.
+## Bidirectional RPC (Requests)
 
-## Sending packets
+Requests block thread progression safely via coroutine yields.
 
-On the client:
-
+### Client Execution
 ```luau
-Chat.Message:send("hello")
+task.spawn(function()
+	local success, result = CombatChannel.RequestHeal:request(50)
+	if success then
+		print("Heal executed:", result)
+	end
+end)
 ```
 
-On the server:
-
+### Server Execution
 ```luau
-Chat.Message:sendTo(player, "welcome")
-Chat.Message:sendToAll("server restart soon")
+CombatChannel.RequestHeal:handle(function(player: Player, mana: number): boolean
+	if player:GetAttribute("Mana") >= mana then
+		player:SetAttribute("Mana", player:GetAttribute("Mana") - mana)
+		return true
+	end
+	return false
+end)
 ```
 
-Use packets for one-way communication.
+## In-Place Data Mutability (Pooling)
 
-## Using invokes
-
-Invokes are useful when one side needs a direct response.
+Avoid continuous table reconstruction inside game loops by implementing explicit pooling:
 
 ```luau
-local ok, result = Chat.Ping:invoke(player, nil)
-if ok then
-	print(result)
-end
+local VectorSchema = Snap.struct({ x = Snap.float32, y = Snap.float32 })
+local cachedOutput = { x = 0, y = 0 }
+
+-- Executes without triggering Garbage Collection spikes
+local result, nextOffset = VectorSchema.read(sourceBuffer, 0, cachedOutput)
 ```
-
-Use invokes when the request naturally expects a reply.
-
-## Modeling data with schemas
-
-Prefer explicit schemas over loosely typed payloads:
-
-```luau
-local HitSchema = Snap.struct({
-	TargetId = Snap.uint32,
-	Damage = Snap.uint16,
-})
-```
-
-This keeps your network surface easier to audit and evolve.
-
-## Standalone serialization
-
-If you need to encode data outside remotes, use `serialize` and `deserialize`.
-
-```luau
-local b, refs = Snap.serialize(HitSchema, {
-	TargetId = 10,
-	Damage = 25,
-})
-
-local value = Snap.deserialize(HitSchema, b, refs)
-```
-
-## Practical Advice
-
-- Keep namespace names stable.
-- Avoid changing keys casually once the contract is in use.
-- Prefer explicit structs for long-lived features.
-- Keep shared definitions in one place to avoid drift.
-
-## Next
-
-- [Installation](./installation.md)
-- [Snap API](./snap.md)
-
-## License
-
-MIT. See `LICENSE`.

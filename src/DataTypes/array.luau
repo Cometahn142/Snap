@@ -33,9 +33,9 @@ local function array<T>(element: DataType<T>): DataType<{ T }>
 		return total
 	end
 
-	local function read(b: buffer, offset: number): ({ T }, number)
+	local function read(b: buffer, offset: number, target: { T }?): ({ T }, number)
 		local count, cursor = readVarint(b, offset)
-		local result = table.create(count)
+		local result: { T } = target or table.create(count)
 		for i = 1, count do
 			local v: T
 			v, cursor = elementRead(b, cursor)

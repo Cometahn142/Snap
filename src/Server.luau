@@ -10,8 +10,8 @@ local Core = Root.Core
 local BufferWriter = require(Core.BufferWriter)
 local Frame = require(Core.Frame)
 local Guard = require(Core.Guard)
-local Invoke = require(Core.Invoke)
-local Namespace = require(Core.Namespace)
+local Request = require(Core.Request)
+local Channel = require(Core.Channel)
 local FastDefer = require(Core.FastDefer)
 local ThreadPool = require(Core.ThreadPool)
 local Bandwidth = require(Core.Bandwidth)
@@ -21,34 +21,33 @@ local Settings = require(Root.Settings)
 local Types = require(Root.Types)
 
 type BufferWriter = BufferWriter.BufferWriter
-type NamespaceInternal = Namespace.Namespace
-type PacketDefinition<T> = Types.PacketDefinition<T>
-type InvokeDefinition<Req, Res> = Types.InvokeDefinition<Req, Res>
-type ServerPacket<T> = Types.ServerPacket<T>
-type ServerInvoke<Req, Res> = Types.ServerInvoke<Req, Res>
-type NamespaceBuilder = Types.NamespaceBuilder
-type NamespaceDefinition = Types.NamespaceDefinition
+type ChannelInternal = Channel.Channel
+type EventDefinition<T> = Types.EventDefinition<T>
+type RequestDefinition<Req, Res> = Types.RequestDefinition<Req, Res>
+type ServerEvent<T> = Types.ServerEvent<T>
+type ServerRequest<Req, Res> = Types.ServerRequest<Req, Res>
+type ChannelDefinition = Types.ChannelDefinition
 type TransportPair = Transport.TransportPair
 type Reliability = Types.Reliability
 type PlayerGuardState = Guard.PlayerGuardState
-type RequestValue<Req> = Invoke.RequestValue<Req>
-type ResponseValue<Res> = Invoke.ResponseValue<Res>
+type RequestValue<Req> = Request.RequestValue<Req>
+type ResponseValue<Res> = Request.ResponseValue<Res>
 
 type Listener = (player: Player, value: any) -> ()
-type InvokeHandler = (player: Player, value: any) -> any
+type RequestHandler = (player: Player, value: any) -> any
 
-type PendingInvoke = {
+type PendingRequest = {
 	thread: thread,
 	player: Player,
 	startedAt: number,
-	invokeName: string,
+	requestName: string,
 }
 
 type RuntimeState = {
-	namespace: NamespaceInternal,
+	channel: ChannelInternal,
 	transport: TransportPair,
 	listeners: { [number]: { Listener } },
-	invokeHandlers: { [string]: InvokeHandler },
+	RequestHandlers: { [string]: RequestHandler },
 
 	reliableQueues: { [Player]: BufferWriter },
 	unreliableQueues: { [Player]: BufferWriter },
@@ -59,8 +58,8 @@ type RuntimeState = {
 
 	guardStates: { [Player]: PlayerGuardState },
 
-	pendingInvokes: { [Player]: { [number]: PendingInvoke } },
-	hasPendingInvokes: boolean,
+	pendingRequests: { [Player]: { [number]: PendingRequest } },
+	hasPendingRequests: boolean,
 	nextCorrIdByPlayer: { [Player]: number },
 
 	readyPlayers: { [Player]: boolean },
@@ -71,11 +70,11 @@ type RuntimeState = {
 
 local USE_XPCALL = Settings.USE_XPCALL
 local GUARD_ENABLED = Guard.ENABLED
-local INVOKE_TIMEOUT = Settings.GUARD.INVOKE_TIMEOUT
+local INVOKE_TIMEOUT = Settings.GUARD.REQUEST_TIMEOUT
 local READY_TIMEOUT = Settings.READY_TIMEOUT
 local MAX_PREREADY_QUEUE_BYTES = Settings.MAX_PREREADY_QUEUE_BYTES
 local EARLY_FLUSH_ENABLED = Settings.EARLY_FLUSH_ENABLED
-local EARLY_FLUSH_INVOKE_ONLY = Settings.EARLY_FLUSH_INVOKE_ONLY
+local EARLY_FLUSH_REQUEST_ONLY = Settings.EARLY_FLUSH_REQUEST_ONLY
 local OMIT_OUTER_LENGTH_PREFIX = Settings.OMIT_OUTER_LENGTH_PREFIX
 local BANDWIDTH_TRACKING = Settings.BANDWIDTH_TRACKING
 local readVarint = Frame.readVarint
@@ -89,6 +88,36 @@ local heartbeatConnected = false
 local flushAll: () -> ()
 local requestEarlyFlush: () -> ()
 local EARLY_FLUSH_KEY = "snap_server_flush"
+
+local serverPendingPool: { PendingRequest } = {}
+
+local function acquireServerPending(
+	thread: thread,
+	player: Player,
+	startedAt: number,
+	requestName: string
+): PendingRequest
+	local pending = table.remove(serverPendingPool)
+	if pending then
+		pending.thread = thread
+		pending.player = player
+		pending.startedAt = startedAt
+		pending.requestName = requestName
+		return pending
+	else
+		return {
+			thread = thread,
+			player = player,
+			startedAt = startedAt,
+			requestName = requestName,
+		}
+	end
+end
+
+local function releaseServerPending(pending: PendingRequest)
+	table.clear(pending :: any)
+	table.insert(serverPendingPool, pending)
+end
 
 local function assertServer()
 	if not RunService:IsServer() then
@@ -185,7 +214,7 @@ local function dropOversizedQueue(
 			"[Snap] Dropping pre-ready %s queue for %s in '%s' (%d bytes > %d)",
 			kind,
 			player.Name,
-			runtime.namespace.name,
+			runtime.channel.name,
 			writer.cursor,
 			MAX_PREREADY_QUEUE_BYTES
 		)
@@ -196,7 +225,7 @@ end
 local function flush(runtime: RuntimeState)
 	local transport = runtime.transport
 	local readyPlayers = runtime.readyPlayers
-	local wireId = runtime.namespace.wireId
+	local wireId = runtime.channel.wireId
 
 	local br = runtime.broadcastReliable
 	if br.cursor > 0 then
@@ -244,37 +273,38 @@ local function flush(runtime: RuntimeState)
 end
 
 local function sweepTimeouts(runtime: RuntimeState, now: number)
-	if not runtime.hasPendingInvokes then
+	if not runtime.hasPendingRequests then
 		return
 	end
 
-	local pendingInvokes = runtime.pendingInvokes
+	local pendingRequests = runtime.pendingRequests
 	local guardStates = runtime.guardStates
 	local deadlineCutoff = now - INVOKE_TIMEOUT
 	local stillHas = false
 
-	for player, perPlayer in pendingInvokes do
+	for player, perPlayer in pendingRequests do
 		local anyRemaining = false
 		for corrId, pending in perPlayer do
 			if pending.startedAt <= deadlineCutoff then
 				perPlayer[corrId] = nil
 				local gs = guardStates[player]
 				if gs then
-					gs.pendingInvokes = math.max(0, gs.pendingInvokes - 1)
+					gs.pendingRequests = math.max(0, gs.pendingRequests - 1)
 				end
 				resumeInvokeWaiter(pending.thread, false, "timeout")
+				releaseServerPending(pending)
 			else
 				anyRemaining = true
 			end
 		end
 		if not anyRemaining then
-			pendingInvokes[player] = nil
+			pendingRequests[player] = nil
 		else
 			stillHas = true
 		end
 	end
 
-	runtime.hasPendingInvokes = stillHas
+	runtime.hasPendingRequests = stillHas
 end
 
 function flushAll()
@@ -296,8 +326,8 @@ function requestEarlyFlush()
 	FastDefer.defer(EARLY_FLUSH_KEY, runEarlyFlush)
 end
 
-local function requestInvokeFlush()
-	if EARLY_FLUSH_INVOKE_ONLY then
+local function requestFlush()
+	if EARLY_FLUSH_REQUEST_ONLY then
 		requestEarlyFlush()
 	end
 end
@@ -313,33 +343,33 @@ end
 local function sendInvokeResponse(
 	runtime: RuntimeState,
 	player: Player,
-	responseDef: PacketDefinition<any>,
+	responseDef: EventDefinition<any>,
 	responseValue: ResponseValue<any>
 )
 	local writer = acquireReliable(runtime, player)
 	Frame.appendPacket(writer, responseDef, responseValue)
-	requestInvokeFlush()
+	requestFlush()
 end
 
 local function handleInvokeRequest(
 	runtime: RuntimeState,
 	player: Player,
-	def: PacketDefinition<any>,
+	def: EventDefinition<any>,
 	decoded: RequestValue<any>
 )
-	local invokeName = def.invokeName
-	if not invokeName then
+	local requestName = def.requestName
+	if not requestName then
 		return
 	end
 
-	local invokeDef = runtime.namespace.invokes[invokeName]
-	if not invokeDef then
+	local requestDef = runtime.channel.requests[requestName]
+	if not requestDef then
 		return
 	end
 
-	local handler = runtime.invokeHandlers[invokeName]
+	local handler = runtime.RequestHandlers[requestName]
 	if not handler then
-		sendInvokeResponse(runtime, player, invokeDef.response, {
+		sendInvokeResponse(runtime, player, requestDef.response, {
 			corrId = decoded.corrId,
 			ok = false,
 			err = "no handler",
@@ -349,13 +379,13 @@ local function handleInvokeRequest(
 
 	local ok, result = pcall(handler, player, decoded.value)
 	if ok then
-		sendInvokeResponse(runtime, player, invokeDef.response, {
+		sendInvokeResponse(runtime, player, requestDef.response, {
 			corrId = decoded.corrId,
 			ok = true,
 			value = result,
 		})
 	else
-		sendInvokeResponse(runtime, player, invokeDef.response, {
+		sendInvokeResponse(runtime, player, requestDef.response, {
 			corrId = decoded.corrId,
 			ok = false,
 			err = tostring(result),
@@ -364,7 +394,7 @@ local function handleInvokeRequest(
 end
 
 local function handleInvokeResponse(runtime: RuntimeState, player: Player, decoded: ResponseValue<any>)
-	local pendingForPlayer = runtime.pendingInvokes[player]
+	local pendingForPlayer = runtime.pendingRequests[player]
 	if not pendingForPlayer then
 		return
 	end
@@ -376,12 +406,12 @@ local function handleInvokeResponse(runtime: RuntimeState, player: Player, decod
 
 	pendingForPlayer[decoded.corrId] = nil
 	if next(pendingForPlayer) == nil then
-		runtime.pendingInvokes[player] = nil
+		runtime.pendingRequests[player] = nil
 	end
 
 	local guardState = runtime.guardStates[player]
 	if guardState then
-		guardState.pendingInvokes = math.max(0, guardState.pendingInvokes - 1)
+		guardState.pendingRequests = math.max(0, guardState.pendingRequests - 1)
 	end
 
 	if decoded.ok then
@@ -389,10 +419,11 @@ local function handleInvokeResponse(runtime: RuntimeState, player: Player, decod
 	else
 		resumeInvokeWaiter(pending.thread, false, decoded.err)
 	end
+	releaseServerPending(pending)
 end
 
-local function dispatchPacket(runtime: RuntimeState, def: PacketDefinition<any>, player: Player, decodedValue: any)
-	local role = def.invokeRole
+local function dispatchPacket(runtime: RuntimeState, def: EventDefinition<any>, player: Player, decodedValue: any)
+	local role = def.requestRole
 	if role == "request" then
 		handleInvokeRequest(runtime, player, def, decodedValue :: RequestValue<any>)
 	elseif role == "response" then
@@ -474,18 +505,12 @@ local function ensureGlobalServerReceive()
 		end
 		local runtime = runtimeByWireId[channelId]
 		if not runtime then
-			Guard.report(
-				player,
-				"?",
-				"unknownPacket",
-				string.format("unknown namespace wire id %d", channelId),
-				nil
-			)
+			Guard.report(player, "?", "unknownPacket", string.format("unknown channel wire id %d", channelId), nil)
 			return
 		end
-		local namespace = runtime.namespace
+		local channel = runtime.channel
 		local guardState = getOrCreateGuardState(runtime, player)
-		if GUARD_ENABLED and not Guard.checkFrame(guardState, wire, player, namespace.name) then
+		if GUARD_ENABLED and not Guard.checkFrame(guardState, wire, player, channel.name) then
 			return
 		end
 		if BANDWIDTH_TRACKING then
@@ -496,8 +521,8 @@ local function ensureGlobalServerReceive()
 		if not ok then
 			warn(
 				string.format(
-					"[Snap] Frame dispatch failure in namespace '%s' from %s: %s",
-					namespace.name,
+					"[Snap] Frame dispatch failure in channel '%s' from %s: %s",
+					channel.name,
 					player.Name,
 					tostring(err)
 				)
@@ -526,8 +551,8 @@ local function ensureGlobalServerReceive()
 end
 
 local function setupReceive(runtime: RuntimeState)
-	local namespace = runtime.namespace
-	local packets = namespace.packets
+	local channel = runtime.channel
+	local packets = channel.packets
 
 	if USE_XPCALL then
 		runtime._dispatchFrame = function(player: Player, inner: buffer, refs: any)
@@ -537,16 +562,16 @@ local function setupReceive(runtime: RuntimeState)
 
 			local decodeOk, decodeErr: any = pcall(
 				Frame.decode,
-				namespace,
+				channel,
 				inner,
 				function(def, payloadBuffer, payloadOffset)
 					if GUARD_ENABLED then
-						if def.invokeRole == "request" then
-							if not Guard.accountInvoke(guardState, player, namespace.name) then
+						if def.requestRole == "request" then
+							if not Guard.accountRequest(guardState, player, channel.name) then
 								return
 							end
 						end
-						if not Guard.accountPacket(guardState, player, namespace.name) then
+						if not Guard.accountPacket(guardState, player, channel.name) then
 							return
 						end
 					end
@@ -578,8 +603,8 @@ local function setupReceive(runtime: RuntimeState)
 			if not decodeOk then
 				warn(
 					string.format(
-						"[Snap] Frame decode failure in namespace '%s' from %s: %s",
-						namespace.name,
+						"[Snap] Frame decode failure in channel '%s' from %s: %s",
+						channel.name,
 						player.Name,
 						tostring(decodeErr)
 					)
@@ -599,7 +624,7 @@ local function setupReceive(runtime: RuntimeState)
 				if not def then
 					Guard.report(
 						player,
-						namespace.name,
+						channel.name,
 						"unknownPacket",
 						string.format("id=%d at offset %d (remaining frame dropped)", packetId, cursor - 1),
 						guardState
@@ -614,7 +639,7 @@ local function setupReceive(runtime: RuntimeState)
 					if cursor + payloadSize > length then
 						Guard.report(
 							player,
-							namespace.name,
+							channel.name,
 							"malformedFrame",
 							string.format(
 								"packet '%s' claims %d bytes but only %d remain",
@@ -628,13 +653,13 @@ local function setupReceive(runtime: RuntimeState)
 					end
 
 					if GUARD_ENABLED then
-						if def.invokeRole == "request" then
-							if not Guard.accountInvoke(guardState, player, namespace.name) then
+						if def.requestRole == "request" then
+							if not Guard.accountRequest(guardState, player, channel.name) then
 								cursor += payloadSize
 								continue
 							end
 						end
-						if not Guard.accountPacket(guardState, player, namespace.name) then
+						if not Guard.accountPacket(guardState, player, channel.name) then
 							cursor += payloadSize
 							continue
 						end
@@ -651,7 +676,7 @@ local function setupReceive(runtime: RuntimeState)
 					if nextCursor > length or nextCursor < payloadOffset then
 						Guard.report(
 							player,
-							namespace.name,
+							channel.name,
 							"malformedFrame",
 							string.format("packet '%s' read past frame (%d > %d)", def.name, nextCursor, length),
 							guardState
@@ -660,13 +685,13 @@ local function setupReceive(runtime: RuntimeState)
 					end
 
 					if GUARD_ENABLED then
-						if def.invokeRole == "request" then
-							if not Guard.accountInvoke(guardState, player, namespace.name) then
+						if def.requestRole == "request" then
+							if not Guard.accountRequest(guardState, player, channel.name) then
 								cursor = nextCursor
 								continue
 							end
 						end
-						if not Guard.accountPacket(guardState, player, namespace.name) then
+						if not Guard.accountPacket(guardState, player, channel.name) then
 							cursor = nextCursor
 							continue
 						end
@@ -683,7 +708,7 @@ local function setupReceive(runtime: RuntimeState)
 					if cursor + payloadSize > length then
 						Guard.report(
 							player,
-							namespace.name,
+							channel.name,
 							"malformedFrame",
 							string.format(
 								"packet '%s' claims %d bytes but only %d remain",
@@ -697,13 +722,13 @@ local function setupReceive(runtime: RuntimeState)
 					end
 
 					if GUARD_ENABLED then
-						if def.invokeRole == "request" then
-							if not Guard.accountInvoke(guardState, player, namespace.name) then
+						if def.requestRole == "request" then
+							if not Guard.accountRequest(guardState, player, channel.name) then
 								cursor += payloadSize
 								continue
 							end
 						end
-						if not Guard.accountPacket(guardState, player, namespace.name) then
+						if not Guard.accountPacket(guardState, player, channel.name) then
 							cursor += payloadSize
 							continue
 						end
@@ -725,8 +750,8 @@ local function setupReceive(runtime: RuntimeState)
 			if not ok then
 				warn(
 					string.format(
-						"[Snap] Frame decode failure in namespace '%s' from %s: %s",
-						namespace.name,
+						"[Snap] Frame decode failure in channel '%s' from %s: %s",
+						channel.name,
 						player.Name,
 						tostring(err)
 					)
@@ -735,7 +760,7 @@ local function setupReceive(runtime: RuntimeState)
 		end
 	end
 
-	runtimeByWireId[namespace.wireId] = runtime
+	runtimeByWireId[channel.wireId] = runtime
 	ensureGlobalServerReceive()
 end
 
@@ -750,13 +775,13 @@ local function cleanupPlayer(player: Player)
 		runtime.readyPlayers[player] = nil
 		runtime.readyDeadlines[player] = nil
 
-		local pendingForPlayer = runtime.pendingInvokes[player]
+		local pendingForPlayer = runtime.pendingRequests[player]
 		if pendingForPlayer then
 			for corrId, pending in pendingForPlayer do
 				pendingForPlayer[corrId] = nil
 				resumeInvokeWaiter(pending.thread, false, "player left")
 			end
-			runtime.pendingInvokes[player] = nil
+			runtime.pendingRequests[player] = nil
 		end
 	end
 end
@@ -779,9 +804,9 @@ local function registerPlayerReadyDeadline(player: Player)
 			if not runtime.readyPlayers[player] then
 				warn(
 					string.format(
-						"[Snap] Ready timeout for %s in namespace '%s' (%ds)",
+						"[Snap] Ready timeout for %s in channel '%s' (%ds)",
 						player.Name,
-						runtime.namespace.name,
+						runtime.channel.name,
 						READY_TIMEOUT
 					)
 				)
@@ -796,11 +821,11 @@ for _, player in Players:GetPlayers() do
 	registerPlayerReadyDeadline(player)
 end
 
-local function createPacketHandle<T>(runtime: RuntimeState, definition: PacketDefinition<T>): ServerPacket<T>
+local function createPacketHandle<T>(runtime: RuntimeState, definition: EventDefinition<T>): ServerEvent<T>
 	local id = definition.id
 	local isReliable = definition.reliability == "Reliable"
 
-	local handle = {} :: ServerPacket<T>
+	local handle = {} :: ServerEvent<T>
 
 	local acquire: (runtime: RuntimeState, player: Player) -> BufferWriter = if isReliable
 		then acquireReliable
@@ -879,57 +904,52 @@ local function createPacketHandle<T>(runtime: RuntimeState, definition: PacketDe
 	return handle
 end
 
-local function createInvokeHandle<Req, Res>(runtime: RuntimeState, invokeDef: InvokeDefinition<Req, Res>): ServerInvoke<Req, Res>
-	local invokeName = invokeDef.name
-	local requestDef = invokeDef.request
+local function createRequestHandle<Req, Res>(runtime: RuntimeState, def: RequestDefinition<Req, Res>): ServerRequest<Req, Res>
+	local requestName = def.name
+	local requestDef = def.request
 
-	local handle = {} :: ServerInvoke<Req, Res>
+	local handle = {} :: ServerRequest<Req, Res>
 
-	function handle.invoke(_self, player: Player, value: Req): (boolean, any)
+	function handle.request(_self, player: Player, value: Req): (boolean, any)
 		local thread = coroutine.running()
 		if not thread then
-			return false, "invoke must be called from a coroutine"
+			return false, "request must be called from a coroutine"
 		end
 
 		local guardState = getOrCreateGuardState(runtime, player)
-		if not Guard.canAllocatePending(guardState, player, runtime.namespace.name) then
-			return false, "pending invoke limit reached"
+		if not Guard.canAllocatePending(guardState, player, runtime.channel.name) then
+			return false, "pending request limit reached"
 		end
 
 		local corrId = allocateCorrId(runtime, player)
 
-		local pendingForPlayer = runtime.pendingInvokes[player]
+		local pendingForPlayer = runtime.pendingRequests[player]
 		if not pendingForPlayer then
 			pendingForPlayer = {}
-			runtime.pendingInvokes[player] = pendingForPlayer
+			runtime.pendingRequests[player] = pendingForPlayer
 		end
 
-		local pending: PendingInvoke = {
-			thread = thread,
-			player = player,
-			startedAt = os.clock(),
-			invokeName = invokeName,
-		}
+		local pending = acquireServerPending(thread, player, os.clock(), requestName)
 		pendingForPlayer[corrId] = pending
-		guardState.pendingInvokes += 1
-		runtime.hasPendingInvokes = true
+		guardState.pendingRequests += 1
+		runtime.hasPendingRequests = true
 
 		local writer = acquireReliable(runtime, player)
 		Frame.appendPacket(writer, requestDef, {
 			corrId = corrId,
 			value = value,
 		})
-		requestInvokeFlush()
+		requestFlush()
 
 		return coroutine.yield()
 	end
 
 	function handle.handle(_self, callback)
-		runtime.invokeHandlers[invokeName] = callback :: any
+		runtime.RequestHandlers[requestName] = callback :: any
 
 		return function()
-			if runtime.invokeHandlers[invokeName] == callback then
-				runtime.invokeHandlers[invokeName] = nil
+			if runtime.RequestHandlers[requestName] == callback then
+				runtime.RequestHandlers[requestName] = nil
 			end
 		end
 	end
@@ -937,26 +957,23 @@ local function createInvokeHandle<Req, Res>(runtime: RuntimeState, invokeDef: In
 	return handle
 end
 
-function Server.defineNamespace<D>(
-	name: string,
-	builder: (p: NamespaceBuilder) -> D & NamespaceDefinition
-): { [string]: any } & D
+function Server.channel<D>(name: string, definition: D & ChannelDefinition): { [string]: any } & D
 	assertServer()
 	ensureHeartbeat()
 
 	local existingRuntime = runtimeByName[name]
 	if existingRuntime then
-		error(string.format("[Snap] Namespace '%s' is already defined on the server", name), 2)
+		error(string.format("[Snap] Channel '%s' is already defined on the server", name), 2)
 	end
 
-	local namespace = Namespace.define(name, builder :: any)
+	local channel = Channel.define(name, definition :: any)
 	local transport = Transport.getGlobalTransport()
 
 	local runtime: RuntimeState = {
-		namespace = namespace,
+		channel = channel,
 		transport = transport,
 		listeners = {},
-		invokeHandlers = {},
+		RequestHandlers = {},
 		reliableQueues = {},
 		unreliableQueues = {},
 		dirtyReliable = {},
@@ -964,8 +981,8 @@ function Server.defineNamespace<D>(
 		broadcastReliable = BufferWriter.new(),
 		broadcastUnreliable = BufferWriter.new(),
 		guardStates = {},
-		pendingInvokes = {},
-		hasPendingInvokes = false,
+		pendingRequests = {},
+		hasPendingRequests = false,
 		nextCorrIdByPlayer = {},
 		readyPlayers = {},
 		readyDeadlines = {},
@@ -983,11 +1000,11 @@ function Server.defineNamespace<D>(
 	end
 
 	local result: { [string]: any } = {}
-	for entryName, entry in namespace.definition do
-		if (entry :: any).kind == "invoke" then
-			result[entryName] = createInvokeHandle(runtime, entry :: InvokeDefinition<any, any>)
+	for entryName, entry in channel.definition do
+		if (entry :: any).kind == "request" then
+			result[entryName] = createRequestHandle(runtime, entry :: RequestDefinition<any, any>)
 		else
-			result[entryName] = createPacketHandle(runtime, entry :: PacketDefinition<any>)
+			result[entryName] = createPacketHandle(runtime, entry :: EventDefinition<any>)
 		end
 	end
 

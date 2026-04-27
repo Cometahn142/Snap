@@ -6,8 +6,8 @@ local Types = require(script.Parent.Parent.Types)
 local Varint = require(script.Parent.Varint)
 
 type DataType<T> = Types.DataType<T>
-type PacketDefinition<T> = Types.PacketDefinition<T>
-type InvokeDefinition<Req, Res> = Types.InvokeDefinition<Req, Res>
+type EventDefinition<T> = Types.EventDefinition<T>
+type RequestDefinition<Req, Res> = Types.RequestDefinition<Req, Res>
 
 export type RequestValue<Req> = {
 	corrId: number,
@@ -25,7 +25,7 @@ local writeUnsigned = Varint.writeUnsigned
 local readUnsigned = Varint.readUnsigned
 local sizeUnsigned = Varint.sizeUnsigned
 
-local Invoke = {}
+local Request = {}
 
 local function wrapRequest<Req>(inner: DataType<Req>): DataType<RequestValue<Req>>
 	local innerSize = inner.size
@@ -120,37 +120,37 @@ local function wrapResponse<Res>(inner: DataType<Res>): DataType<ResponseValue<R
 	}
 end
 
-function Invoke.createDefinition<Req, Res>(
+function Request.createDefinition<Req, Res>(
 	requestSchema: DataType<Req>,
 	responseSchema: DataType<Res>
-): InvokeDefinition<Req, Res>
+): RequestDefinition<Req, Res>
 	local requestWrapped = wrapRequest(requestSchema)
 	local responseWrapped = wrapResponse(responseSchema)
 
-	local request: PacketDefinition<any> = {
+	local request: EventDefinition<any> = {
 		id = -1,
 		name = "",
 		schema = requestWrapped :: any,
 		reliability = "Reliable",
 		isFixed = false,
 		fixedSize = 0,
-		invokeRole = "request",
-		invokeName = "",
+		requestRole = "request",
+		requestName = "",
 	}
 
-	local response: PacketDefinition<any> = {
+	local response: EventDefinition<any> = {
 		id = -1,
 		name = "",
 		schema = responseWrapped :: any,
 		reliability = "Reliable",
 		isFixed = false,
 		fixedSize = 0,
-		invokeRole = "response",
-		invokeName = "",
+		requestRole = "response",
+		requestName = "",
 	}
 
 	return {
-		kind = "invoke",
+		kind = "request",
 		name = "",
 		requestSchema = requestSchema,
 		responseSchema = responseSchema,
@@ -159,4 +159,9 @@ function Invoke.createDefinition<Req, Res>(
 	}
 end
 
-return Invoke
+return Request
+
+
+
+
+

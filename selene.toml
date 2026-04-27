@@ -1,1 +1,12 @@
 std = "roblox"
+
+[lints]
+shadowing = "deny"
+unused_variable = "deny"
+global_usage = "deny"
+empty_if = "deny"
+empty_loop = "deny"
+multiple_statements = "deny"
+roblox_suspicious_wait = "deny"
+manual_table_clear = "deny"
+roblox_incorrect_color3_new_bounds = "deny"

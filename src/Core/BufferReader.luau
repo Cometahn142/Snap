@@ -57,3 +57,8 @@ function BufferReader.advance(self: BufferReader, length: number): number
 end
 
 return BufferReader
+
+
+
+
+

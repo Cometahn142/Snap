@@ -3,8 +3,8 @@
 --!optimize 2
 
 --[[
-	Color3 (3 × f32 = 12B). 정밀한 색상 (HDR 포함) 필요 시 사용.
-	일반적인 UI/게임 색상이라면 color3b(3B)가 압도적으로 효율적.
+	Color3 (3 × f32 = 12B). ?��????�상 (HDR ?�함) ?�요 ???�용.
+	?�반?�인 UI/게임 ?�상?�라�?color3b(3B)가 ?�도?�으�??�율??
 ]]
 
 local Types = require(script.Parent.Parent.Types)

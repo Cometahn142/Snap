@@ -1,52 +1,41 @@
 # Installation
 
-This page covers the common ways to add Snap to a Roblox project.
+Snap is a high-performance, schema-driven networking library for Roblox. This guide covers the methods to integrate Snap into your Roblox project.
 
 ## Method 1: Wally
 
-If your project already uses Wally, this is the cleanest setup.
+If your project utilizes Wally for dependency management, update your `wally.toml` file:
 
 ```toml
 [dependencies]
-Snap = "cometahn142/snap@^0.1"
+Snap = "cometahn142/snap@^0.3.0"
 ```
 
-Install dependencies through your normal Wally workflow, then expose the
-package through Rojo or your project layout as usual.
+Run the installation command in your workspace:
+```bash
+wally install
+```
 
-## Method 2: Manual
+Ensure your sourcemap and file synchronization tooling (e.g., Rojo) properly expose the packages to `ReplicatedStorage`.
 
-If you are not using a package manager, you can still vendor Snap directly:
+## Method 2: Manual Installation
 
-1. Copy the `src` folder into your project.
-2. Expose it as a module named `Snap`.
-3. Require it from a shared location available to the code that needs it.
-
-This is fine for prototypes, internal tools, or projects that vendor all
-dependencies into source control.
+For environments not using a package manager:
+1. Extract the `src` directory from the repository.
+2. Vendor it into your Roblox environment as a ModuleScript named `Snap`.
+3. Place it in a shared location accessible to both the client and the server (e.g., `ReplicatedStorage`).
 
 ## Verification
 
-Once installed, this should work:
+To verify the setup, require the module and declare a basic channel:
 
 ```luau
-local Snap = require(Packages.Snap)
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Snap = require(ReplicatedStorage.Packages.Snap)
 
-local Test = Snap.defineNamespace("Test", function(p)
-	return {
-		Message = p.packet(Snap.string),
-	}
-end)
+local TestChannel = Snap.channel("TestChannel", {
+	Message = Snap.event(Snap.string)
+})
 ```
 
-If the module requires successfully and the namespace builds without errors,
-your installation is wired correctly.
-
-## Next
-
-- [Usage Patterns](./usage-patterns.md)
-- [Snap API](./snap.md)
-
-## License
-
-MIT. See `LICENSE`.
+If the script resolves without errors, the installation is fully operational.

@@ -8,7 +8,6 @@ local NAME_RELIABLE = "_R"
 local NAME_UNRELIABLE = "_U"
 local NAME_READY = "_K"
 
--- One byte: namespace wire channel id (registration order, 0..255), not a hash.
 local HEADER_SIZE = 1
 
 export type TransportPair = {
@@ -103,3 +102,7 @@ function Transport.readyPayload(wireId: number): buffer
 end
 
 return Transport
+
+
+
+

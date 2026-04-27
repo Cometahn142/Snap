@@ -13,29 +13,28 @@ local Refs = require(script.Core.Refs)
 export type DataType<T> = Types.DataType<T>
 export type Reliability = Types.Reliability
 export type ReliabilityInput = Types.ReliabilityInput
-export type PacketDefinition<T> = Types.PacketDefinition<T>
-export type InvokeDefinition<Req, Res> = Types.InvokeDefinition<Req, Res>
-export type ServerPacket<T> = Types.ServerPacket<T>
-export type ClientPacket<T> = Types.ClientPacket<T>
-export type ServerInvoke<Req, Res> = Types.ServerInvoke<Req, Res>
-export type ClientInvoke<Req, Res> = Types.ClientInvoke<Req, Res>
-export type NamespaceBuilder = Types.NamespaceBuilder
-export type NamespaceDefinition = Types.NamespaceDefinition
+export type EventDefinition<T> = Types.EventDefinition<T>
+export type RequestDefinition<Req, Res> = Types.RequestDefinition<Req, Res>
+export type ServerEvent<T> = Types.ServerEvent<T>
+export type ClientEvent<T> = Types.ClientEvent<T>
+export type ServerRequest<Req, Res> = Types.ServerRequest<Req, Res>
+export type ClientRequest<Req, Res> = Types.ClientRequest<Req, Res>
+export type ChannelDefinition = Types.ChannelDefinition
 export type Mode = Settings.Mode
 export type GuardConfig = Settings.GuardConfig
 
-export type Packet<T> = {
-	send: (self: Packet<T>, value: T) -> (),
-	sendTo: (self: Packet<T>, player: Player, value: T) -> (),
-	sendToAll: (self: Packet<T>, value: T) -> (),
-	sendToAllExcept: (self: Packet<T>, excluded: Player, value: T) -> (),
-	sendToList: (self: Packet<T>, players: { Player }, value: T) -> (),
-	listen: (self: Packet<T>, callback: (...any) -> ()) -> () -> (),
+export type Event<T> = {
+	send: (self: Event<T>, value: T) -> (),
+	sendTo: (self: Event<T>, player: Player, value: T) -> (),
+	sendToAll: (self: Event<T>, value: T) -> (),
+	sendToAllExcept: (self: Event<T>, excluded: Player, value: T) -> (),
+	sendToList: (self: Event<T>, players: { Player }, value: T) -> (),
+	listen: (self: Event<T>, callback: (...any) -> ()) -> () -> (),
 }
 
-export type Invoke<Req, Res> = {
-	invoke: (self: Invoke<Req, Res>, ...any) -> (boolean, any),
-	handle: (self: Invoke<Req, Res>, callback: (...any) -> Res) -> () -> (),
+export type Request<Req, Res> = {
+	request: (self: Request<Req, Res>, ...any) -> (boolean, any),
+	handle: (self: Request<Req, Res>, callback: (...any) -> Res) -> () -> (),
 }
 
 local Snap = {}
@@ -55,7 +54,7 @@ Snap.float64 = require(DataTypes.float64) :: DataType<number>
 
 Snap.bool = require(DataTypes.bool) :: DataType<boolean>
 Snap.char = require(DataTypes.char) :: DataType<string>
-Snap.string = require(DataTypes["string"]) :: DataType<string>
+Snap.string = require(DataTypes.string) :: DataType<string>
 
 Snap.null = require(DataTypes.null) :: DataType<nil>
 Snap.auto = require(DataTypes.auto) :: DataType<any>
@@ -77,7 +76,7 @@ Snap.flags = require(DataTypes.flags) :: (names: { string }) -> DataType<{ [stri
 Snap.Settings = Settings
 Snap.Bandwidth = require(script.Core.Bandwidth)
 
-local function resolveNamespaceImpl()
+local function resolvechannelImpl()
 	if RunService:IsServer() then
 		return (require :: any)(script.Server)
 	else
@@ -85,13 +84,16 @@ local function resolveNamespaceImpl()
 	end
 end
 
-function Snap.defineNamespace<D>(
-	name: string,
-	builder: (p: NamespaceBuilder) -> D & NamespaceDefinition
-): { [string]: any } & D
-	local impl = resolveNamespaceImpl()
-	return impl.defineNamespace(name, builder :: any)
+function Snap.channel<D>(name: string, definition: D & Types.ChannelDefinition): { [string]: any } & D
+	local impl = resolvechannelImpl()
+	return impl.channel(name, definition :: any)
 end
+
+Snap.definechannel = Snap.channel
+
+local Channel = require(script.Core.Channel)
+Snap.event = Channel.event
+Snap.request = Channel.request
 
 function Snap.serialize<T>(schema: DataType<T>, value: T): (buffer, { any }?)
 	local size = schema.size
