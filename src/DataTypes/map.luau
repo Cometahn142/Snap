@@ -60,20 +60,14 @@ local function map<K, V>(key: DataType<K>, value: DataType<V>): DataType<{ [K]: 
 	end
 
 	local function write(b: buffer, offset: number, tbl: { [K]: V }): number
-		local reserved = 5
-		local payloadStart = offset + reserved
-		local cursor = payloadStart
 		local count = 0
-		for k, v in tbl do
+		for _ in tbl do
 			count += 1
+		end
+		local cursor = writeVarint(b, offset, count)
+		for k, v in tbl do
 			cursor = keyWrite(b, cursor, k)
 			cursor = valueWrite(b, cursor, v)
-		end
-		local actualLen = varintSize(count)
-		writeVarint(b, offset, count)
-		if actualLen ~= reserved then
-			buffer.copy(b, offset + actualLen, b, payloadStart, cursor - payloadStart)
-			cursor -= (reserved - actualLen)
 		end
 		return cursor
 	end
