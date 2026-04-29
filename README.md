@@ -1,41 +1,43 @@
 # Snap
 
-Snap is a performance-oriented, strongly typed network framework optimized for Roblox Luau implementations.
+A fast binary serialization and networking library.
 
-## Key Architecture Goals
+버퍼 기반의 초고속 바이너리 직렬화 네트워킹 라이브러리입니다.
 
-* **Strict Serialization Rules:** Binary payloads reduce operational overhead compared to raw tables.
-* **Consolidated APIs:** Streamlined channel definitions simplify cross-environment bindings.
-* **Memory Stability:** Native support for table pooling restricts transient heap allocations.
+---
 
-## Wally Integration
+## Documentation / 상세 문서
+- [English Documentation](./docs/en/installation.md)
+- [한국어 공식 문서](./docs/kr/installation.md)
 
-Add the following specification into your manifest:
+---
 
+## Table of Contents / 목차
+- [English](#english)
+- [한국어](#한국어)
+
+---
+
+## English
+
+### Overview
+`Snap` compresses payloads drastically.
+
+### Installation
 ```toml
 [dependencies]
-Snap = "cometahn142/snap@^0.3.0"
+Snap = "cometahn142/snap@^0.3"
 ```
 
-## Implementation Outline
+---
 
-```luau
-local Snap = require(Packages.Snap)
+## 한국어
 
-local GameChannel = Snap.channel("GameChannel", {
-	Telemetry = Snap.event(Snap.struct({
-		tick = Snap.uint32,
-		position = Snap.vector3
-	}), "Unreliable")
-})
+### 개요
+`Snap`은 대역폭을 절약하는 엄격한 타입 직렬화를 제공합니다.
+
+### 설치 방법
+```toml
+[dependencies]
+Snap = "cometahn142/snap@^0.3"
 ```
-
-## Comprehensive Documentation
-
-* [Installation](./docs/installation.md)
-* [Snap API Definitions](./docs/snap.md)
-* [Workflow Usage Patterns](./docs/usage-patterns.md)
-
-## License
-
-MIT. View the `LICENSE` registry for complete guidelines.
