@@ -1,7 +1,7 @@
 [package]
 name = "cometahn142/snap"
 description = "Snap For Roblox"
-version = "0.3.2"
+version = "0.4.0"
 license = "MIT"
 authors = ["Cometahn142"]
 registry = "https://github.com/UpliftGames/wally-index"
