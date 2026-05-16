@@ -61,14 +61,20 @@ Snap.auto = require(DataTypes.auto) :: DataType<any>
 Snap.unknown = require(DataTypes.unknown) :: DataType<unknown>
 Snap.inst = require(DataTypes.inst) :: DataType<Instance?>
 
+Snap.vector2 = require(DataTypes.vector2) :: DataType<Vector2>
+Snap.vector2int16 = require(DataTypes.vector2int16) :: DataType<Vector2int16>
 Snap.vector3 = require(DataTypes.vector3) :: DataType<Vector3>
 Snap.vector3int16 = require(DataTypes.vector3int16) :: DataType<Vector3int16>
 Snap.color3 = require(DataTypes.color3) :: DataType<Color3>
 Snap.color3b = require(DataTypes.color3b) :: DataType<Color3>
 Snap.cframe = require(DataTypes.cframe) :: DataType<CFrame>
+Snap.ray = require(DataTypes.ray) :: DataType<Ray>
+Snap.brickcolor = require(DataTypes.brickcolor) :: DataType<BrickColor>
+Snap.datetime = require(DataTypes.datetime) :: DataType<DateTime>
 
 Snap.struct = require(DataTypes.struct) :: (fields: { [string]: DataType<any> }) -> DataType<{ [string]: any }>
 Snap.array = require(DataTypes.array) :: <T>(element: DataType<T>) -> DataType<{ T }>
+Snap.bitarray = require(DataTypes.bitarray) :: DataType<{ boolean }>
 Snap.map = require(DataTypes.map) :: <K, V>(key: DataType<K>, value: DataType<V>) -> DataType<{ [K]: V }>
 Snap.optional = require(DataTypes.optional) :: <T>(inner: DataType<T>) -> DataType<T?>
 Snap.flags = require(DataTypes.flags) :: (names: { string }) -> DataType<{ [string]: boolean }>

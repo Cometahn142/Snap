@@ -7,6 +7,15 @@ local callbackByKey: { [string]: () -> () } = {}
 
 local FastDefer = {}
 
+local function executeTask(key: string)
+	pendingByKey[key] = nil
+	local fn = callbackByKey[key]
+	callbackByKey[key] = nil
+	if fn then
+		fn()
+	end
+end
+
 function FastDefer.defer(key: string, callback: () -> ())
 	if pendingByKey[key] then
 		return
@@ -14,14 +23,7 @@ function FastDefer.defer(key: string, callback: () -> ())
 	pendingByKey[key] = true
 	callbackByKey[key] = callback
 
-	task.defer(function()
-		pendingByKey[key] = nil
-		local fn = callbackByKey[key]
-		callbackByKey[key] = nil
-		if fn then
-			fn()
-		end
-	end)
+	task.defer(executeTask, key)
 end
 
 return FastDefer

@@ -17,6 +17,7 @@ export type BufferWriter = {
 	writeU16: (self: BufferWriter, value: number) -> (),
 	writeBuffer: (self: BufferWriter, source: buffer, sourceOffset: number, length: number) -> (),
 	finalize: (self: BufferWriter) -> buffer,
+	finalizeWithWireId: (self: BufferWriter, wireId: number) -> buffer,
 	reset: (self: BufferWriter) -> (),
 }
 
@@ -90,6 +91,14 @@ function BufferWriter.finalize(self: BufferWriter): buffer
 	return result
 end
 
+function BufferWriter.finalizeWithWireId(self: BufferWriter, wireId: number): buffer
+	local cursor = self.cursor
+	local result = buffer.create(cursor + 1)
+	buffer.writeu8(result, 0, wireId)
+	buffer.copy(result, 1, self.buffer, 0, cursor)
+	return result
+end
+
 function BufferWriter.shrinkRangeInPlace(
 	self: BufferWriter,
 	slotOffset: number,
@@ -121,8 +130,3 @@ function BufferWriter.reset(self: BufferWriter)
 end
 
 return BufferWriter
-
-
-
-
-

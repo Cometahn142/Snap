@@ -12,6 +12,11 @@ export type ReliabilityInput = Reliability | "R" | "U"
 
 export type RequestRole = "request" | "response"
 
+export type Connection = {
+	Disconnect: (self: Connection) -> (),
+	Connected: boolean,
+}
+
 export type EventDefinition<T> = {
 	id: number,
 	name: string,
@@ -38,11 +43,17 @@ export type ServerEvent<T> = {
 	sendToAllExcept: (self: ServerEvent<T>, excluded: Player, value: T) -> (),
 	sendToList: (self: ServerEvent<T>, players: { Player }, value: T) -> (),
 	listen: (self: ServerEvent<T>, callback: (player: Player, value: T) -> ()) -> () -> (),
+	Connect: (self: ServerEvent<T>, callback: (player: Player, value: T) -> ()) -> Connection,
+	Once: (self: ServerEvent<T>, callback: (player: Player, value: T) -> ()) -> Connection,
+	Wait: (self: ServerEvent<T>) -> (Player, T),
 }
 
 export type ClientEvent<T> = {
 	send: (self: ClientEvent<T>, value: T) -> (),
 	listen: (self: ClientEvent<T>, callback: (value: T) -> ()) -> () -> (),
+	Connect: (self: ClientEvent<T>, callback: (value: T) -> ()) -> Connection,
+	Once: (self: ClientEvent<T>, callback: (value: T) -> ()) -> Connection,
+	Wait: (self: ClientEvent<T>) -> T,
 }
 
 export type ServerRequest<Req, Res> = {

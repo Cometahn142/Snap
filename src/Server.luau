@@ -13,7 +13,7 @@ local Guard = require(Core.Guard)
 local Request = require(Core.Request)
 local Channel = require(Core.Channel)
 local FastDefer = require(Core.FastDefer)
-local ThreadPool = require(Core.ThreadPool)
+local Signify = require(Root.Packages.Signify)
 local Bandwidth = require(Core.Bandwidth)
 local Refs = require(Core.Refs)
 local Transport = require(Core.Transport)
@@ -33,7 +33,6 @@ type PlayerGuardState = Guard.PlayerGuardState
 type RequestValue<Req> = Request.RequestValue<Req>
 type ResponseValue<Res> = Request.ResponseValue<Res>
 
-type Listener = (player: Player, value: any) -> ()
 type RequestHandler = (player: Player, value: any) -> any
 
 type PendingRequest = {
@@ -46,13 +45,20 @@ type PendingRequest = {
 type RuntimeState = {
 	channel: ChannelInternal,
 	transport: TransportPair,
-	listeners: { [number]: { Listener } },
+	signifies: { [number]: any },
 	RequestHandlers: { [string]: RequestHandler },
 
 	reliableQueues: { [Player]: BufferWriter },
 	unreliableQueues: { [Player]: BufferWriter },
-	dirtyReliable: { [Player]: boolean },
-	dirtyUnreliable: { [Player]: boolean },
+
+	dirtyReliableArray: { Player },
+	nextReliableArray: { Player },
+	dirtyReliableSet: { [Player]: boolean },
+
+	dirtyUnreliableArray: { Player },
+	nextUnreliableArray: { Player },
+	dirtyUnreliableSet: { [Player]: boolean },
+
 	broadcastReliable: BufferWriter,
 	broadcastUnreliable: BufferWriter,
 
@@ -68,7 +74,6 @@ type RuntimeState = {
 	_dispatchFrame: any,
 }
 
-local USE_XPCALL = Settings.USE_XPCALL
 local GUARD_ENABLED = Guard.ENABLED
 local INVOKE_TIMEOUT = Settings.GUARD.REQUEST_TIMEOUT
 local READY_TIMEOUT = Settings.READY_TIMEOUT
@@ -135,15 +140,27 @@ local function getOrCreateQueue(queues: { [Player]: BufferWriter }, player: Play
 	return new
 end
 
-local function acquireReliable(runtime: RuntimeState, player: Player): BufferWriter
+local function acquireReliable(runtime: RuntimeState, player: Player): BufferWriter?
+	if not player.Parent then
+		return nil
+	end
 	local writer = getOrCreateQueue(runtime.reliableQueues, player)
-	runtime.dirtyReliable[player] = true
+	if not runtime.dirtyReliableSet[player] then
+		runtime.dirtyReliableSet[player] = true
+		table.insert(runtime.dirtyReliableArray, player)
+	end
 	return writer
 end
 
-local function acquireUnreliable(runtime: RuntimeState, player: Player): BufferWriter
+local function acquireUnreliable(runtime: RuntimeState, player: Player): BufferWriter?
+	if not player.Parent then
+		return nil
+	end
 	local writer = getOrCreateQueue(runtime.unreliableQueues, player)
-	runtime.dirtyUnreliable[player] = true
+	if not runtime.dirtyUnreliableSet[player] then
+		runtime.dirtyUnreliableSet[player] = true
+		table.insert(runtime.dirtyUnreliableArray, player)
+	end
 	return writer
 end
 
@@ -180,9 +197,8 @@ local function sendFrame(
 	writer: BufferWriter,
 	wireId: number
 )
-	local inner = writer:finalize()
+	local wire = writer:finalizeWithWireId(wireId)
 	local refs = if #writer.refs > 0 then writer.refs else nil
-	local wire = Transport.wrapFrame(wireId, inner)
 	writer:reset()
 	if BANDWIDTH_TRACKING then
 		Bandwidth.recordOut(buffer.len(wire))
@@ -238,9 +254,13 @@ local function flush(runtime: RuntimeState)
 	end
 
 	local reliableQueues = runtime.reliableQueues
-	local dirtyReliable = runtime.dirtyReliable
-	for player in dirtyReliable do
-		dirtyReliable[player] = nil
+	local dirtyReliableArr = runtime.dirtyReliableArray
+	local nextReliableArr = runtime.nextReliableArray
+	table.clear(nextReliableArr)
+
+	for i = 1, #dirtyReliableArr do
+		local player = dirtyReliableArr[i]
+		runtime.dirtyReliableSet[player] = nil
 		local writer = reliableQueues[player]
 		if not writer or writer.cursor == 0 then
 			continue
@@ -250,14 +270,21 @@ local function flush(runtime: RuntimeState)
 		elseif writer.cursor > MAX_PREREADY_QUEUE_BYTES then
 			dropOversizedQueue(runtime, player, reliableQueues, writer, "reliable")
 		else
-			dirtyReliable[player] = true
+			runtime.dirtyReliableSet[player] = true
+			table.insert(nextReliableArr, player)
 		end
 	end
+	runtime.nextReliableArray = runtime.dirtyReliableArray
+	runtime.dirtyReliableArray = nextReliableArr
 
 	local unreliableQueues = runtime.unreliableQueues
-	local dirtyUnreliable = runtime.dirtyUnreliable
-	for player in dirtyUnreliable do
-		dirtyUnreliable[player] = nil
+	local dirtyUnreliableArr = runtime.dirtyUnreliableArray
+	local nextUnreliableArr = runtime.nextUnreliableArray
+	table.clear(nextUnreliableArr)
+
+	for i = 1, #dirtyUnreliableArr do
+		local player = dirtyUnreliableArr[i]
+		runtime.dirtyUnreliableSet[player] = nil
 		local writer = unreliableQueues[player]
 		if not writer or writer.cursor == 0 then
 			continue
@@ -267,9 +294,12 @@ local function flush(runtime: RuntimeState)
 		elseif writer.cursor > MAX_PREREADY_QUEUE_BYTES then
 			dropOversizedQueue(runtime, player, unreliableQueues, writer, "unreliable")
 		else
-			dirtyUnreliable[player] = true
+			runtime.dirtyUnreliableSet[player] = true
+			table.insert(nextUnreliableArr, player)
 		end
 	end
+	runtime.nextUnreliableArray = runtime.dirtyUnreliableArray
+	runtime.dirtyUnreliableArray = nextUnreliableArr
 end
 
 local function sweepTimeouts(runtime: RuntimeState, now: number)
@@ -347,8 +377,10 @@ local function sendInvokeResponse(
 	responseValue: ResponseValue<any>
 )
 	local writer = acquireReliable(runtime, player)
-	Frame.appendPacket(writer, responseDef, responseValue)
-	requestFlush()
+	if writer then
+		Frame.appendPacket(writer, responseDef, responseValue)
+		requestFlush()
+	end
 end
 
 local function handleInvokeRequest(
@@ -429,57 +461,9 @@ local function dispatchPacket(runtime: RuntimeState, def: EventDefinition<any>, 
 	elseif role == "response" then
 		handleInvokeResponse(runtime, player, decodedValue :: ResponseValue<any>)
 	else
-		local packetListeners = runtime.listeners[def.id]
-		if not packetListeners then
-			return
-		end
-
-		if USE_XPCALL then
-			local packetName = def.name
-			for _, listener in packetListeners do
-				xpcall(listener, function(err)
-					warn(
-						string.format(
-							"[Snap] Listener error for packet '%s': %s\n%s",
-							packetName,
-							tostring(err),
-							debug.traceback(nil, 2)
-						)
-					)
-				end, player, decodedValue)
-			end
-		else
-			local packetName = def.name
-			if #packetListeners == 1 then
-				local listener = packetListeners[1]
-				local ok, err: any = pcall(listener, player, decodedValue)
-				if not ok then
-					warn(
-						string.format(
-							"[Snap] Listener error for packet '%s' from %s: %s",
-							packetName,
-							player.Name,
-							tostring(err)
-						)
-					)
-				end
-			else
-				for _, listener in packetListeners do
-					ThreadPool.spawn2(function(p, v)
-						local ok, err: any = pcall(listener, p, v)
-						if not ok then
-							warn(
-								string.format(
-									"[Snap] Listener error for packet '%s' from %s: %s",
-									packetName,
-									p.Name,
-									tostring(err)
-								)
-							)
-						end
-					end, player, decodedValue)
-				end
-			end
+		local signify = runtime.signifies[def.id]
+		if signify then
+			signify:Fire(player, decodedValue)
 		end
 	end
 end
@@ -499,8 +483,8 @@ local function ensureGlobalServerReceive()
 		if wireLen < Transport.HEADER_SIZE + 1 then
 			return
 		end
-		local channelId, inner = Transport.unwrapFrame(wire)
-		if channelId == nil or inner == nil then
+		local channelId, offset = Transport.unwrapFrame(wire)
+		if channelId == nil or offset == nil then
 			return
 		end
 		local runtime = runtimeByWireId[channelId]
@@ -517,7 +501,7 @@ local function ensureGlobalServerReceive()
 			Bandwidth.recordIn(wireLen)
 		end
 		local dispatch = runtime._dispatchFrame :: any
-		local ok, err: any = pcall(dispatch, player, inner, refs)
+		local ok, err: any = pcall(dispatch, player, wire, offset, refs)
 		if not ok then
 			warn(
 				string.format(
@@ -554,8 +538,8 @@ local function setupReceive(runtime: RuntimeState)
 	local channel = runtime.channel
 	local packets = channel.packets
 
-	if USE_XPCALL then
-		runtime._dispatchFrame = function(player: Player, inner: buffer, refs: any)
+	if Settings.USE_XPCALL then
+		runtime._dispatchFrame = function(player: Player, wire: buffer, offset: number, refs: any)
 			local guardState = getOrCreateGuardState(runtime, player)
 
 			Refs.beginRead(if typeof(refs) == "table" then refs else nil)
@@ -563,7 +547,8 @@ local function setupReceive(runtime: RuntimeState)
 			local decodeOk, decodeErr: any = pcall(
 				Frame.decode,
 				channel,
-				inner,
+				wire,
+				offset,
 				function(def, payloadBuffer, payloadOffset)
 					if GUARD_ENABLED then
 						if def.requestRole == "request" then
@@ -577,24 +562,20 @@ local function setupReceive(runtime: RuntimeState)
 					end
 
 					local packetName = def.name
-					local decodedValue: any = nil
-					local packetDecodeOk = xpcall(function()
-						decodedValue = (def.schema.read(payloadBuffer, payloadOffset))
-					end, function(err)
+					local ok, val1, _val2 = pcall(def.schema.read, payloadBuffer, payloadOffset)
+					if not ok then
 						warn(
 							string.format(
 								"[Snap] Failed to decode packet '%s' from %s: %s",
 								packetName,
 								player.Name,
-								tostring(err)
+								tostring(val1)
 							)
 						)
-					end)
-					if not packetDecodeOk then
 						return
 					end
 
-					dispatchPacket(runtime, def, player, decodedValue)
+					dispatchPacket(runtime, def, player, val1)
 				end
 			)
 
@@ -612,9 +593,9 @@ local function setupReceive(runtime: RuntimeState)
 			end
 		end
 	else
-		local function decodeFast(player: Player, frame: buffer, guardState: PlayerGuardState)
+		local function decodeFast(player: Player, frame: buffer, startOffset: number, guardState: PlayerGuardState)
 			local length = buffer.len(frame)
-			local cursor = 0
+			local cursor = startOffset
 
 			while cursor < length do
 				local packetId = buffer.readu8(frame, cursor)
@@ -741,10 +722,10 @@ local function setupReceive(runtime: RuntimeState)
 			end
 		end
 
-		runtime._dispatchFrame = function(player: Player, inner: buffer, refs: any)
+		runtime._dispatchFrame = function(player: Player, wire: buffer, offset: number, refs: any)
 			local guardState = getOrCreateGuardState(runtime, player)
 			Refs.beginRead(if typeof(refs) == "table" then refs else nil)
-			local ok, err: any = pcall(decodeFast, player, inner, guardState)
+			local ok, err: any = pcall(decodeFast, player, wire, offset, guardState)
 			Refs.endRead()
 
 			if not ok then
@@ -768,8 +749,8 @@ local function cleanupPlayer(player: Player)
 	for _, runtime in runtimeByName do
 		runtime.reliableQueues[player] = nil
 		runtime.unreliableQueues[player] = nil
-		runtime.dirtyReliable[player] = nil
-		runtime.dirtyUnreliable[player] = nil
+		runtime.dirtyReliableSet[player] = nil
+		runtime.dirtyUnreliableSet[player] = nil
 		runtime.guardStates[player] = nil
 		runtime.nextCorrIdByPlayer[player] = nil
 		runtime.readyPlayers[player] = nil
@@ -827,13 +808,21 @@ local function createPacketHandle<T>(runtime: RuntimeState, definition: EventDef
 
 	local handle = {} :: ServerEvent<T>
 
-	local acquire: (runtime: RuntimeState, player: Player) -> BufferWriter = if isReliable
+	local acquire: (runtime: RuntimeState, player: Player) -> BufferWriter? = if isReliable
 		then acquireReliable
 		else acquireUnreliable
 
+	local signify = runtime.signifies[id]
+	if not signify then
+		signify = Signify.new()
+		runtime.signifies[id] = signify
+	end
+
 	function handle.sendTo(_self, player, value)
 		local writer = acquire(runtime, player)
-		Frame.appendPacket(writer, definition, value)
+		if writer then
+			Frame.appendPacket(writer, definition, value)
+		end
 	end
 
 	function handle.sendToAll(_self, value)
@@ -850,7 +839,9 @@ local function createPacketHandle<T>(runtime: RuntimeState, definition: EventDef
 				local player = players[i]
 				if player ~= excluded then
 					local writer = acquire(runtime, player)
-					Frame.appendRaw(writer, sharedBuf, sharedLen)
+					if writer then
+						Frame.appendRaw(writer, sharedBuf, sharedLen)
+					end
 				end
 			end
 			return
@@ -860,7 +851,9 @@ local function createPacketHandle<T>(runtime: RuntimeState, definition: EventDef
 			local player = players[i]
 			if player ~= excluded then
 				local writer = acquire(runtime, player)
-				Frame.appendPacket(writer, definition, value)
+				if writer then
+					Frame.appendPacket(writer, definition, value)
+				end
 			end
 		end
 	end
@@ -870,35 +863,38 @@ local function createPacketHandle<T>(runtime: RuntimeState, definition: EventDef
 		if sharedBuf then
 			for _, player in players do
 				local writer = acquire(runtime, player)
-				Frame.appendRaw(writer, sharedBuf, sharedLen)
+				if writer then
+					Frame.appendRaw(writer, sharedBuf, sharedLen)
+				end
 			end
 			return
 		end
 
 		for _, player in players do
 			local writer = acquire(runtime, player)
-			Frame.appendPacket(writer, definition, value)
+			if writer then
+				Frame.appendPacket(writer, definition, value)
+			end
 		end
 	end
 
 	function handle.listen(_self, callback)
-		local packetListeners = runtime.listeners[id]
-		if not packetListeners then
-			packetListeners = {}
-			runtime.listeners[id] = packetListeners
-		end
-		table.insert(packetListeners, callback :: any)
-
+		local conn = signify:Connect(callback)
 		return function()
-			local current = runtime.listeners[id]
-			if not current then
-				return
-			end
-			local index = table.find(current, callback :: any)
-			if index then
-				table.remove(current, index)
-			end
+			conn:Disconnect()
 		end
+	end
+
+	function handle.Connect(_self, callback)
+		return signify:Connect(callback)
+	end
+
+	function handle.Once(_self, callback)
+		return signify:Once(callback)
+	end
+
+	function handle.Wait(_self)
+		return signify:Wait()
 	end
 
 	return handle
@@ -935,11 +931,13 @@ local function createRequestHandle<Req, Res>(runtime: RuntimeState, def: Request
 		runtime.hasPendingRequests = true
 
 		local writer = acquireReliable(runtime, player)
-		Frame.appendPacket(writer, requestDef, {
-			corrId = corrId,
-			value = value,
-		})
-		requestFlush()
+		if writer then
+			Frame.appendPacket(writer, requestDef, {
+				corrId = corrId,
+				value = value,
+			})
+			requestFlush()
+		end
 
 		return coroutine.yield()
 	end
@@ -972,12 +970,16 @@ function Server.channel<D>(name: string, definition: D & ChannelDefinition): { [
 	local runtime: RuntimeState = {
 		channel = channel,
 		transport = transport,
-		listeners = {},
+		signifies = {},
 		RequestHandlers = {},
 		reliableQueues = {},
 		unreliableQueues = {},
-		dirtyReliable = {},
-		dirtyUnreliable = {},
+		dirtyReliableArray = {},
+		nextReliableArray = {},
+		dirtyReliableSet = {},
+		dirtyUnreliableArray = {},
+		nextUnreliableArray = {},
+		dirtyUnreliableSet = {},
 		broadcastReliable = BufferWriter.new(),
 		broadcastUnreliable = BufferWriter.new(),
 		guardStates = {},

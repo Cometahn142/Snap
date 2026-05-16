@@ -179,10 +179,11 @@ if not OMIT_FIXED_LENGTH then
 	function Frame.decode(
 		channel: ChannelLike,
 		frameBuffer: buffer,
+		startOffset: number,
 		onPacket: (definition: EventDefinition<any>, payloadBuffer: buffer, payloadOffset: number) -> ()
 	)
 		local length = buffer.len(frameBuffer)
-		local cursor = 0
+		local cursor = startOffset
 		local packets = channel.packets
 
 		while cursor < length do

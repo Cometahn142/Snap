@@ -4,11 +4,6 @@
 
 local Varint = {}
 
-local band = bit32.band
-local bor = bit32.bor
-local rshift = bit32.rshift
-local lshift = bit32.lshift
-
 function Varint.sizeUnsigned(value: number): number
 	if value < 128 then
 		return 1
@@ -28,9 +23,9 @@ function Varint.writeUnsigned(b: buffer, offset: number, value: number): number
 		return offset + 1
 	end
 	while value >= 128 do
-		buffer.writeu8(b, offset, bor(band(value, 0x7F), 0x80))
+		buffer.writeu8(b, offset, bit32.bor(bit32.band(value, 0x7F), 0x80))
 		offset += 1
-		value = rshift(value, 7)
+		value = bit32.rshift(value, 7)
 	end
 	buffer.writeu8(b, offset, value)
 	return offset + 1
@@ -41,13 +36,13 @@ function Varint.readUnsigned(b: buffer, offset: number): (number, number)
 	if byte < 128 then
 		return byte, offset + 1
 	end
-	local value = band(byte, 0x7F)
+	local value = bit32.band(byte, 0x7F)
 	local shift = 7
 	offset += 1
 	while true do
 		byte = buffer.readu8(b, offset)
 		offset += 1
-		value = bor(value, lshift(band(byte, 0x7F), shift))
+		value = bit32.bor(value, bit32.lshift(bit32.band(byte, 0x7F), shift))
 		if byte < 128 then
 			return value, offset
 		end

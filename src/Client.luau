@@ -12,7 +12,7 @@ local Guard = require(Core.Guard)
 local Request = require(Core.Request)
 local Channel = require(Core.Channel)
 local FastDefer = require(Core.FastDefer)
-local ThreadPool = require(Core.ThreadPool)
+local Signify = require(Root.Packages.Signify)
 local Bandwidth = require(Core.Bandwidth)
 local Refs = require(Core.Refs)
 local Transport = require(Core.Transport)
@@ -32,7 +32,6 @@ type PlayerGuardState = Guard.PlayerGuardState
 type RequestValue<Req> = Request.RequestValue<Req>
 type ResponseValue<Res> = Request.ResponseValue<Res>
 
-type Listener = (value: any) -> ()
 type RequestHandler = (value: any) -> any
 
 type PendingRequest = {
@@ -44,7 +43,7 @@ type PendingRequest = {
 type RuntimeState = {
 	channel: ChannelInternal,
 	transport: TransportPair,
-	listeners: { [number]: { Listener } },
+	signifies: { [number]: any },
 	RequestHandlers: { [string]: RequestHandler },
 
 	reliableQueue: BufferWriter,
@@ -59,7 +58,6 @@ type RuntimeState = {
 	_dispatchFrame: any,
 }
 
-local USE_XPCALL = Settings.USE_XPCALL
 local GUARD_ENABLED = Guard.ENABLED
 local REQUEST_TIMEOUT = Settings.GUARD.REQUEST_TIMEOUT
 local EARLY_FLUSH_ENABLED = Settings.EARLY_FLUSH_ENABLED
@@ -108,9 +106,8 @@ local function assertClient()
 end
 
 local function sendFrame(remote: RemoteEvent | UnreliableRemoteEvent, writer: BufferWriter, wireId: number)
-	local inner = writer:finalize()
+	local wire = writer:finalizeWithWireId(wireId)
 	local refs = if #writer.refs > 0 then writer.refs else nil
-	local wire = Transport.wrapFrame(wireId, inner)
 	writer:reset()
 	if BANDWIDTH_TRACKING then
 		Bandwidth.recordOut(buffer.len(wire))
@@ -283,43 +280,9 @@ local function dispatchPacket(runtime: RuntimeState, def: EventDefinition<any>, 
 	elseif role == "response" then
 		handleRequestResponse(runtime, decodedValue :: ResponseValue<any>)
 	else
-		local packetListeners = runtime.listeners[def.id]
-		if not packetListeners then
-			return
-		end
-
-		if USE_XPCALL then
-			local packetName = def.name
-			for _, listener in packetListeners do
-				xpcall(listener, function(err)
-					warn(
-						string.format(
-							"[Snap] Listener error for packet '%s': %s\n%s",
-							packetName,
-							tostring(err),
-							debug.traceback(nil, 2)
-						)
-					)
-				end, decodedValue)
-			end
-		else
-			local packetName = def.name
-			if #packetListeners == 1 then
-				local listener = packetListeners[1]
-				local ok, err: any = pcall(listener, decodedValue)
-				if not ok then
-					warn(string.format("[Snap] Listener error for packet '%s': %s", packetName, tostring(err)))
-				end
-			else
-				for _, listener in packetListeners do
-					ThreadPool.spawn1(function(v)
-						local ok, err: any = pcall(listener, v)
-						if not ok then
-							warn(string.format("[Snap] Listener error for packet '%s': %s", packetName, tostring(err)))
-						end
-					end, decodedValue)
-				end
-			end
+		local signify = runtime.signifies[def.id]
+		if signify then
+			signify:Fire(decodedValue)
 		end
 	end
 end
@@ -339,8 +302,8 @@ local function ensureGlobalClientReceive()
 		if wireLen < Transport.HEADER_SIZE + 1 then
 			return
 		end
-		local channelId, inner = Transport.unwrapFrame(wire)
-		if channelId == nil or inner == nil then
+		local channelId, offset = Transport.unwrapFrame(wire)
+		if channelId == nil or offset == nil then
 			return
 		end
 		local runtime = runtimeByWireId[channelId]
@@ -357,7 +320,7 @@ local function ensureGlobalClientReceive()
 			Bandwidth.recordIn(wireLen)
 		end
 		local dispatch = runtime._dispatchFrame :: any
-		local ok, err: any = pcall(dispatch, inner, refs)
+		local ok, err: any = pcall(dispatch, wire, offset, refs)
 		if not ok then
 			warn(string.format("[Snap] Frame dispatch failure in channel '%s': %s", channel.name, tostring(err)))
 		end
@@ -371,8 +334,8 @@ local function setupReceive(runtime: RuntimeState)
 	local channel = runtime.channel
 	local packets = channel.packets
 
-	if USE_XPCALL then
-		runtime._dispatchFrame = function(inner: buffer, refs: any)
+	if Settings.USE_XPCALL then
+		runtime._dispatchFrame = function(wire: buffer, offset: number, refs: any)
 			local guardState = runtime.guardState
 
 			Refs.beginRead(if typeof(refs) == "table" then refs else nil)
@@ -380,7 +343,8 @@ local function setupReceive(runtime: RuntimeState)
 			local decodeOk, decodeErr: any = pcall(
 				Frame.decode,
 				channel,
-				inner,
+				wire,
+				offset,
 				function(def, payloadBuffer, payloadOffset)
 					if GUARD_ENABLED then
 						if def.requestRole == "request" then
@@ -394,17 +358,19 @@ local function setupReceive(runtime: RuntimeState)
 					end
 
 					local packetName = def.name
-					local decodedValue: any = nil
-					local packetDecodeOk = xpcall(function()
-						decodedValue = (def.schema.read(payloadBuffer, payloadOffset))
-					end, function(err)
-						warn(string.format("[Snap] Failed to decode packet '%s': %s", packetName, tostring(err)))
-					end)
-					if not packetDecodeOk then
+					local ok, val1, _val2 = pcall(def.schema.read, payloadBuffer, payloadOffset)
+					if not ok then
+						warn(
+							string.format(
+								"[Snap] Failed to decode packet '%s': %s",
+								packetName,
+								tostring(val1)
+							)
+						)
 						return
 					end
 
-					dispatchPacket(runtime, def, decodedValue)
+					dispatchPacket(runtime, def, val1)
 				end
 			)
 
@@ -417,9 +383,9 @@ local function setupReceive(runtime: RuntimeState)
 			end
 		end
 	else
-		local function decodeFast(frame: buffer, guardState: PlayerGuardState)
+		local function decodeFast(frame: buffer, startOffset: number, guardState: PlayerGuardState)
 			local length = buffer.len(frame)
-			local cursor = 0
+			local cursor = startOffset
 
 			while cursor < length do
 				local packetId = buffer.readu8(frame, cursor)
@@ -546,10 +512,10 @@ local function setupReceive(runtime: RuntimeState)
 			end
 		end
 
-		runtime._dispatchFrame = function(inner: buffer, refs: any)
+		runtime._dispatchFrame = function(wire: buffer, offset: number, refs: any)
 			local guardState = runtime.guardState
 			Refs.beginRead(if typeof(refs) == "table" then refs else nil)
-			local ok, err: any = pcall(decodeFast, inner, guardState)
+			local ok, err: any = pcall(decodeFast, wire, offset, guardState)
 			Refs.endRead()
 
 			if not ok then
@@ -568,29 +534,34 @@ local function createPacketHandle<T>(runtime: RuntimeState, definition: EventDef
 
 	local handle = {} :: ClientEvent<T>
 
+	local signify = runtime.signifies[id]
+	if not signify then
+		signify = Signify.new()
+		runtime.signifies[id] = signify
+	end
+
 	function handle.send(_self, value)
 		local writer = if isReliable then runtime.reliableQueue else runtime.unreliableQueue
 		Frame.appendPacket(writer, definition, value)
 	end
 
 	function handle.listen(_self, callback)
-		local packetListeners = runtime.listeners[id]
-		if not packetListeners then
-			packetListeners = {}
-			runtime.listeners[id] = packetListeners
-		end
-		table.insert(packetListeners, callback :: any)
-
+		local conn = signify:Connect(callback)
 		return function()
-			local current = runtime.listeners[id]
-			if not current then
-				return
-			end
-			local index = table.find(current, callback :: any)
-			if index then
-				table.remove(current, index)
-			end
+			conn:Disconnect()
 		end
+	end
+
+	function handle.Connect(_self, callback)
+		return signify:Connect(callback)
+	end
+
+	function handle.Once(_self, callback)
+		return signify:Once(callback)
+	end
+
+	function handle.Wait(_self)
+		return signify:Wait()
 	end
 
 	return handle
@@ -657,7 +628,7 @@ function Client.channel<D>(name: string, definition: D & ChannelDefinition): { [
 	local runtime: RuntimeState = {
 		channel = channel,
 		transport = transport,
-		listeners = {},
+		signifies = {},
 		RequestHandlers = {},
 		reliableQueue = BufferWriter.new(),
 		unreliableQueue = BufferWriter.new(),

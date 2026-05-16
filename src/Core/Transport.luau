@@ -83,16 +83,13 @@ function Transport.wrapFrame(wireId: number, inner: buffer): buffer
 	return out
 end
 
-function Transport.unwrapFrame(wire: buffer): (number?, buffer?)
+function Transport.unwrapFrame(wire: buffer): (number?, number?)
 	local len = buffer.len(wire)
 	if len < HEADER_SIZE then
 		return nil, nil
 	end
 	local wireId = buffer.readu8(wire, 0)
-	local innerLen = len - HEADER_SIZE
-	local inner = buffer.create(innerLen)
-	buffer.copy(inner, 0, wire, HEADER_SIZE, innerLen)
-	return wireId, inner
+	return wireId, HEADER_SIZE
 end
 
 function Transport.readyPayload(wireId: number): buffer
